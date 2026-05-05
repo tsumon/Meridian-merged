@@ -129,13 +129,7 @@ docker run -d --name meridian \
   -p 9090:9090 -p 8001-8010:8001-8010 \
   -v meridian-data:/app/data \
   -e JWT_SECRET=$(openssl rand -hex 32) \
-  ghcr.io/snnabb/meridian:latest
-```
-
-### Linux 一键安装（原版脚本）
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/snnabb/Meridian/master/install.sh)
+  ghcr.io/tsumon/meridian-merged:latest
 ```
 
 ---
@@ -163,7 +157,7 @@ bash <(curl -sL https://raw.githubusercontent.com/snnabb/Meridian/master/install
 ```yaml
 services:
   meridian:
-    image: ghcr.io/snnabb/meridian:latest
+    image: ghcr.io/tsumon/meridian-merged:latest
     restart: unless-stopped
     ports:
       - "9090:9090"

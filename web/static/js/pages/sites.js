@@ -1,0 +1,414 @@
+// Sites management page
+function renderSites() {
+  const page = document.getElementById('page-sites');
+  page.innerHTML = `
+    <h1 class="section-title fade-up">站点管理</h1>
+    <p class="section-sub fade-up stagger-1">管理所有 Emby 反代站点与双上游配置</p>
+    <div class="page-toolbar fade-up stagger-1">
+      <div class="toolbar-info" id="sites-count"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn-ghost" id="btn-export-sites" title="导出所有站点配置为 JSON 备份文件">
+          <svg viewBox="0 0 24 24" style="width:14px;height:14px;margin-right:4px"><path d="M19 9h-4V3H9v6H5l7 7 7-7zm-8 2V5h2v6h1.17L12 13.17 9.83 11H11zm-6 7h14v2H5z"/></svg>
+          导出配置
+        </button>
+        <button class="btn-ghost" id="btn-import-sites" title="从 JSON 文件导入站点配置">
+          <svg viewBox="0 0 24 24" style="width:14px;height:14px;margin-right:4px"><path d="M19 9h-4V3H9v6H5l7 7 7-7zm-8 2V5h2v6h1.17L12 13.17 9.83 11H11zm-6 7h14v2H5z" transform="rotate(180,12,12)"/></svg>
+          导入配置
+        </button>
+        <input type="file" id="import-file-input" accept=".json" style="display:none">
+        <button class="btn-add" id="btn-add-site">
+          <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          添加站点
+        </button>
+      </div>
+    </div>
+    <div class="sites-grid" id="sites-grid"></div>
+  `;
+
+  document.getElementById('btn-add-site').onclick = () => showSiteModal();
+  document.getElementById('btn-export-sites').onclick = exportSitesConfig;
+  document.getElementById('btn-import-sites').onclick = () => document.getElementById('import-file-input').click();
+  document.getElementById('import-file-input').onchange = importSitesConfig;
+  loadSites();
+}
+
+async function loadSites() {
+  try {
+    const sites = await API.listSites();
+    document.getElementById('sites-count').innerHTML = `共 <strong>${sites.length}</strong> 个站点`;
+
+    const grid = document.getElementById('sites-grid');
+    if (!sites || sites.length === 0) {
+      grid.innerHTML = '<div style="text-align:center;color:var(--white-38);padding:60px;grid-column:1/-1">暂无站点，点击右上角添加</div>';
+      return;
+    }
+
+    grid.innerHTML = sites.map((s, i) => {
+      const pct = s.traffic_quota > 0 ? (s.traffic_used / s.traffic_quota * 100).toFixed(1) : 0;
+      const pctClass = pct > 85 ? 'danger' : pct > 50 ? 'warn' : 'normal';
+      const playbackRow = renderPlaybackRow(s);
+
+      return `
+      <div class="site-card fade-up stagger-${Math.min(i + 1, 6)}">
+        <div class="site-top">
+          <div class="site-name">${esc(s.name)}</div>
+          <span class="status-badge">
+            <span class="status-led ${s.running ? 'on' : 'off'}"></span>
+            ${s.running ? '运行中' : '已停止'}
+          </span>
+        </div>
+        <div class="site-rows">
+          <div class="site-row">
+            <span class="site-row-label">主回源地址</span>
+            <span class="mono">${esc(s.target_url)}</span>
+          </div>
+          ${playbackRow}
+          <div class="site-row">
+            <span class="site-row-label">监听端口</span>
+            <span class="mono">:${s.listen_port}</span>
+          </div>
+          <div class="site-row">
+            <span class="site-row-label">UA 模式</span>
+            <span class="pill ${uaClassMap[s.ua_mode] || 'pill-blue'}">${uaNameMap[s.ua_mode] || s.ua_mode}</span>
+          </div>
+          ${s.traffic_quota > 0 ? `
+          <div class="progress-wrap">
+            <div class="progress-labels">
+              <span>已用 ${formatBytes(s.traffic_used)}</span>
+              <span>${formatBytes(s.traffic_quota)}</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill ${pctClass}" style="width:${Math.min(pct, 100)}%"></div>
+            </div>
+          </div>
+          ` : `
+          <div class="site-row">
+            <span class="site-row-label">已用流量</span>
+            <span>${formatBytes(s.traffic_used)}</span>
+          </div>
+          `}
+        </div>
+        <div class="site-actions">
+          <button class="btn-ghost" onclick="toggleSiteAction(${s.id})">${s.enabled ? '停用' : '启用'}</button>
+          <button class="btn-ghost" onclick="editSiteAction(${s.id})">编辑</button>
+          <button class="btn-ghost danger" onclick="deleteSiteAction(${s.id},'${esc(s.name)}')">删除</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    Toast.error('加载站点失败: ' + e.message);
+  }
+}
+
+function renderPlaybackRow(site) {
+  const playback = (site.playback_target_url || '').trim();
+  let extraHosts = [];
+  try { extraHosts = JSON.parse(site.stream_hosts || '[]'); } catch(e) {}
+  const totalHosts = (playback ? 1 : 0) + extraHosts.length;
+
+  if (totalHosts === 0) {
+    return `
+      <div class="site-row">
+        <span class="site-row-label">播放回源</span>
+        <span class="mono mono-subtle">跟随主回源</span>
+      </div>
+    `;
+  }
+
+  if (totalHosts === 1 && playback === (site.target_url || '').trim()) {
+    return `
+      <div class="site-row">
+        <span class="site-row-label">播放回源</span>
+        <span class="mono mono-subtle">与主回源相同</span>
+      </div>
+    `;
+  }
+
+  const modeLabel = site.playback_mode === 'redirect' ? '重定向跟随' : '直连分流';
+  let rows = '';
+  if (playback) {
+    rows += `
+    <div class="site-row">
+      <span class="site-row-label">播放回源</span>
+      <span class="mono">${esc(playback)}</span>
+    </div>`;
+  }
+  for (const h of extraHosts) {
+    rows += `
+    <div class="site-row">
+      <span class="site-row-label">播放回源</span>
+      <span class="mono">${esc(h)}</span>
+    </div>`;
+  }
+  rows += `
+    <div class="site-row">
+      <span class="site-row-label">播放模式</span>
+      <span class="mono">${modeLabel}</span>
+    </div>`;
+  return rows;
+}
+
+function showSiteModal(site) {
+  const isEdit = !!site;
+  const title = isEdit ? '编辑站点' : '添加站点';
+
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = `
+    <div class="form-group">
+      <label>站点名称</label>
+      <input type="text" class="form-input" id="m-name" value="${isEdit ? esc(site.name) : ''}" placeholder="如：Emby-US-01" required>
+    </div>
+    <div class="form-group">
+      <label>主回源地址</label>
+      <input type="text" class="form-input" id="m-target" value="${isEdit ? esc(site.target_url) : ''}" placeholder="如：192.168.1.10:8096 或 https://emby.example.com" required>
+      <div class="form-help">网页、API 和默认回源都走这里。</div>
+    </div>
+    <div class="form-group">
+      <label>播放回源列表（可选，留空跟随主回源）</label>
+      <div id="m-playback-list"></div>
+      <button type="button" class="btn-ghost" id="m-add-playback" style="margin-top:6px;font-size:13px">+ 添加播放回源</button>
+      <div class="form-help">播放、转码或直链资源的独立上游地址。可添加多个，用于多推流/播放节点场景。</div>
+    </div>
+    <div class="form-group" id="playback-mode-group" style="display:none">
+      <label>播放模式</label>
+      <select class="form-select modal-select" id="m-playback-mode">
+        <option value="direct" ${(!isEdit || site.playback_mode !== 'redirect') ? 'selected' : ''}>直连分流</option>
+        <option value="redirect" ${isEdit && site.playback_mode === 'redirect' ? 'selected' : ''}>重定向跟随</option>
+      </select>
+      <div class="form-help">直连分流：播放请求直接发送到首个播放回源（适合完整 Emby 实例）。重定向跟随：所有请求经主回源，自动跟随重定向到任一播放回源（适合多节点 CDN）。</div>
+    </div>
+    <div class="form-group">
+      <label>监听端口</label>
+      <input type="number" class="form-input" id="m-port" value="${isEdit ? site.listen_port : ''}" placeholder="如：8001" required>
+    </div>
+    <div class="form-group">
+      <label>UA 模式</label>
+      <select class="form-select modal-select" id="m-ua">
+        <option value="infuse" ${(!isEdit || site.ua_mode === 'infuse') ? 'selected' : ''}>Infuse</option>
+        <option value="web" ${isEdit && site.ua_mode === 'web' ? 'selected' : ''}>Web</option>
+        <option value="client" ${isEdit && site.ua_mode === 'client' ? 'selected' : ''}>客户端</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>流量额度 (GB, 0=不限)</label>
+      <input type="number" class="form-input" id="m-quota" value="${isEdit ? Math.round((site.traffic_quota || 0) / 1073741824) : 0}" placeholder="0">
+    </div>
+  `;
+
+  document.getElementById('modal-footer').innerHTML = `
+    <button class="btn-modal secondary" onclick="closeModal()">取消</button>
+    <button class="btn-modal primary" id="m-submit">${isEdit ? '保存' : '创建'}</button>
+  `;
+
+  // Build initial playback list from existing data
+  const listContainer = document.getElementById('m-playback-list');
+  const modeGroup = document.getElementById('playback-mode-group');
+  let existingHosts = [];
+  if (isEdit) {
+    if ((site.playback_target_url || '').trim()) existingHosts.push(site.playback_target_url.trim());
+    try {
+      const extra = JSON.parse(site.stream_hosts || '[]');
+      for (const h of extra) if (h && h.trim()) existingHosts.push(h.trim());
+    } catch(e) {}
+  }
+  if (existingHosts.length === 0) existingHosts = [''];
+
+  function renderPlaybackInputs() {
+    listContainer.innerHTML = existingHosts.map((val, idx) => `
+      <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+        <input type="text" class="form-input m-pb-input" value="${esc(val)}" placeholder="${idx === 0 ? '主播放回源地址' : '额外播放回源地址'}" style="flex:1">
+        ${existingHosts.length > 1 ? `<button type="button" class="btn-ghost danger m-pb-remove" data-idx="${idx}" style="padding:4px 8px;font-size:13px;flex-shrink:0">删除</button>` : ''}
+      </div>
+    `).join('');
+    listContainer.querySelectorAll('.m-pb-remove').forEach(btn => {
+      btn.onclick = () => {
+        existingHosts.splice(parseInt(btn.dataset.idx), 1);
+        renderPlaybackInputs();
+        toggleModeGroup();
+      };
+    });
+    listContainer.querySelectorAll('.m-pb-input').forEach((inp, idx) => {
+      inp.oninput = () => { existingHosts[idx] = inp.value; toggleModeGroup(); };
+    });
+  }
+  renderPlaybackInputs();
+
+  document.getElementById('m-add-playback').onclick = () => {
+    existingHosts.push('');
+    renderPlaybackInputs();
+    const inputs = listContainer.querySelectorAll('.m-pb-input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  };
+
+  function toggleModeGroup() {
+    const hasAny = existingHosts.some(h => h.trim());
+    modeGroup.style.display = hasAny ? '' : 'none';
+  }
+  toggleModeGroup();
+
+  document.getElementById('m-submit').onclick = async () => {
+    const allHosts = existingHosts.map(h => h.trim()).filter(Boolean);
+    const data = {
+      name: document.getElementById('m-name').value.trim(),
+      target_url: document.getElementById('m-target').value.trim(),
+      playback_target_url: allHosts.length > 0 ? allHosts[0] : '',
+      playback_mode: document.getElementById('m-playback-mode').value,
+      stream_hosts: allHosts.length > 1 ? allHosts.slice(1) : [],
+      listen_port: parseInt(document.getElementById('m-port').value),
+      ua_mode: document.getElementById('m-ua').value,
+      traffic_quota: parseInt(document.getElementById('m-quota').value || 0) * 1073741824,
+    };
+
+    if (!data.name || !data.target_url || !data.listen_port) {
+      Toast.error('请填写所有必填项');
+      return;
+    }
+
+    try {
+      if (isEdit) {
+        await API.updateSite(site.id, data);
+        Toast.success('站点已更新');
+      } else {
+        await API.createSite(data);
+        Toast.success('站点已创建');
+      }
+      closeModal();
+      loadSites();
+    } catch (e) {
+      Toast.error(e.message);
+    }
+  };
+
+  openModal();
+}
+
+// Global actions
+window.toggleSiteAction = async function(id) {
+  try {
+    const res = await API.toggleSite(id);
+    Toast.success(res.enabled ? '站点已启用' : '站点已停用');
+    loadSites();
+  } catch (e) {
+    Toast.error(e.message);
+  }
+};
+
+window.editSiteAction = async function(id) {
+  try {
+    const sites = await API.listSites();
+    const site = sites.find(s => s.id === id);
+    if (site) showSiteModal(site);
+  } catch (e) {
+    Toast.error(e.message);
+  }
+};
+
+window.deleteSiteAction = function(id, name) {
+  document.getElementById('modal-title').textContent = '确认删除';
+  document.getElementById('modal-body').innerHTML = `<p style="color:var(--white-60)">确定要删除站点 <strong>${name}</strong> 吗？此操作不可撤销。</p>`;
+  document.getElementById('modal-footer').innerHTML = `
+    <button class="btn-modal secondary" onclick="closeModal()">取消</button>
+    <button class="btn-modal primary" style="background:var(--red)" onclick="confirmDelete(${id})">删除</button>
+  `;
+  openModal();
+};
+
+window.confirmDelete = async function(id) {
+  try {
+    await API.deleteSite(id);
+    Toast.success('站点已删除');
+    closeModal();
+    loadSites();
+  } catch (e) {
+    Toast.error(e.message);
+  }
+};
+
+// ==========================================
+// 导出配置
+// ==========================================
+async function exportSitesConfig() {
+  try {
+    const res = await fetch('/api/sites/export', {
+      headers: { 'Authorization': 'Bearer ' + (API.token || '') }
+    });
+    if (!res.ok) throw new Error('导出失败: HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'meridian_backup_' + new Date().toISOString().split('T')[0] + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    Toast.success('✅ 配置已导出');
+  } catch (e) {
+    Toast.error('导出失败: ' + e.message);
+  }
+}
+
+// ==========================================
+// 导入配置
+// ==========================================
+async function importSitesConfig(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = '';
+
+  let parsed;
+  try {
+    const text = await file.text();
+    parsed = JSON.parse(text);
+  } catch (err) {
+    Toast.error('❌ 文件解析失败，请确认是有效的 JSON 格式');
+    return;
+  }
+
+  // 兼容直接是数组 或 包含 sites 字段的对象
+  let sites = [];
+  if (Array.isArray(parsed)) {
+    sites = parsed;
+  } else if (parsed.sites && Array.isArray(parsed.sites)) {
+    sites = parsed.sites;
+  } else {
+    Toast.error('❌ 无效的配置文件格式');
+    return;
+  }
+
+  if (sites.length === 0) {
+    Toast.error('⚠️ 文件中没有可导入的站点');
+    return;
+  }
+
+  // 展示确认弹窗
+  const names = sites.map(s => `• ${s.name || '(未命名)'} → :${s.listen_port || '?'} → ${s.target_url || '?'}`).join('\n');
+  document.getElementById('modal-title').textContent = '确认导入配置';
+  document.getElementById('modal-body').innerHTML = `
+    <p style="color:var(--white-60);margin-bottom:12px">即将导入以下 <strong>${sites.length}</strong> 个站点（已存在的站点名称会新建副本）：</p>
+    <pre style="background:var(--surface);padding:12px;border-radius:8px;font-size:12px;color:var(--white-60);overflow:auto;max-height:200px;white-space:pre-wrap;line-height:1.6">${esc(names)}</pre>
+    <p style="color:var(--white-38);font-size:12px;margin-top:10px">⚠️ 导入不会覆盖现有站点，每次导入均会创建新站点。</p>
+  `;
+  document.getElementById('modal-footer').innerHTML = `
+    <button class="btn-modal secondary" onclick="closeModal()">取消</button>
+    <button class="btn-modal primary" id="m-confirm-import">确认导入</button>
+  `;
+  document.getElementById('m-confirm-import').onclick = async () => {
+    closeModal();
+    try {
+      const res = await fetch('/api/sites/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + (API.token || '')
+        },
+        body: JSON.stringify({ sites })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '导入失败');
+      Toast.success(`✅ 成功导入 ${data.created} 个站点` + (data.skipped > 0 ? `，跳过 ${data.skipped} 个` : ''));
+      loadSites();
+    } catch (err) {
+      Toast.error('导入失败: ' + err.message);
+    }
+  };
+  openModal();
+}
